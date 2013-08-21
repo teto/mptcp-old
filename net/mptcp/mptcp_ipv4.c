@@ -546,6 +546,7 @@ static int mptcp_pm_inetaddr_event(struct notifier_block *this,
 				   unsigned long event, void *ptr)
 {
 	return mptcp_pm_addr_event_handler(event, ptr, AF_INET);
+//	return mptcp_pm_queue_event(event , ifa->addr, AF_INET );
 }
 
 /* React on ifup/down-events */

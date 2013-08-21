@@ -96,6 +96,9 @@ extern spinlock_t mptcp_reqsk_hlock;	/* hashtable protection */
  */
 extern spinlock_t mptcp_tk_hashlock;	/* hashtable protection */
 
+
+struct mptcp_event* mptcp_look_for_similar_event( void* ptr, int family);
+
 void mptcp_create_subflows(struct sock *meta_sk);
 void mptcp_create_subflow_worker(struct work_struct *work);
 void mptcp_retry_subflow_worker(struct work_struct *work);

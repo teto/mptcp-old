@@ -97,6 +97,26 @@ struct request_sock *rev_mptcp_rsk(const struct mptcp_request_sock *req)
 	return (struct request_sock *)req;
 }
 
+
+
+struct mptcp_event {
+	struct list_head list;
+	struct rcu_head	rcu;
+	int family;
+//	 event_type;	/* UP/DOWN/CHANGE */
+	unsigned long event_type;
+
+	//mptcp_address address;
+	union   {
+		struct in_addr	addr_v4;
+		struct in6_addr	addr_v6;
+	} ;
+//		struct in_ifaddr * if_addrv4;
+//		struct inet6_ifaddr * if_addrv6; /* look like it got removed in 3.10 */
+//	};
+};
+
+
 struct mptcp_options_received {
 	u16	saw_mpc:1,
 		dss_csum:1,
@@ -606,6 +626,12 @@ static inline int mptcp_sub_len_dss(struct mp_dss *m, int csum)
  * just not used. */
 #define MPTCP_MSS 1400
 #define MPTCP_SYN_RETRIES 3
+
+/* Default time between 2 processings of the event queue
+ */
+#define MPTCP_EVENT_QUEUE_TICK_DELAY 500
+
+
 extern int sysctl_mptcp_ndiffports;
 extern int sysctl_mptcp_enabled;
 extern int sysctl_mptcp_checksum;

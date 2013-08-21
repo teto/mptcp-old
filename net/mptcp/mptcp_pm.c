@@ -49,6 +49,13 @@
 #include <net/addrconf.h>
 #endif
 
+
+struct list_head mptcp_addr_waitq;	/* TODO rename */
+struct timer_list mptcp_event_wq_timer;
+
+spinlock_t mptcp_event_queue_lock;
+
+
 static inline u32 mptcp_hash_tk(u32 token)
 {
 	return token % MPTCP_HASH_SIZE;
@@ -67,6 +74,7 @@ spinlock_t mptcp_reqsk_hlock;	/* hashtable protection */
 /* The following hash table is used to avoid collision of token */
 static struct hlist_nulls_head mptcp_reqsk_tk_htb[MPTCP_HASH_SIZE];
 spinlock_t mptcp_tk_hashlock;	/* hashtable protection */
+spinlock_t mptcp_event_queue_lock;	/* event queue protection */
 
 static int mptcp_reqsk_find_tk(u32 token)
 {
@@ -656,6 +664,269 @@ exit:
 	mutex_unlock(&mpcb->mutex);
 	sock_put(meta_sk);
 }
+
+
+
+/*
+ * called every XXXms, deals with addition/removal of addresses
+ * On removal or new address update subflows !
+ * TODO should synchronize from scratch every now and then
+ * should we use our own set of events ?
+ */
+void mptcp_pm_process_events(unsigned long arg)
+{
+	struct mptcp_event *event = 0, *temp = 0;
+//	int loc4_changed_bits = 0, loc6_changed_bits = 0;
+//	int changed_bit = 0;	/* position of the bit change */
+//	int found_index = -1;
+
+
+	/* backup bits so that at the end we can establish a mask of which addresses got changed
+	 * and upgrade subflows accordingly
+	 * */
+//	int loc4_bits_backup = mptcp_local_addr_set.loc4_bits;
+//	int loc6_bits_backup = mptcp_local_addr_set.loc6_bits;
+
+	mptcp_debug("Processing event queue\n");
+
+
+	spin_lock_bh(&mptcp_event_queue_lock);
+
+	/* for every entry in the queue */
+	// type/temp/head/name of the member
+	list_for_each_entry_safe(event, temp, &mptcp_addr_waitq, list) {
+
+
+
+		mptcp_debug("Processing event %ld, inetfamily=%d addr\n", event->event_type, event->family);
+
+		// we launch what should have been launched
+		/* don't care if we pass v4 or addr_v6 since it is an union*/
+		mptcp_pm_addr_event_handler(event->event_type,  &event->addr_v4 , event->family);
+
+//		if( event->family == AF_INET ){
+//			// int &
+//			mptcp_pm_addrset_process_event( event, mptcp_local_addr_set );
+//		}
+//		else {
+//
+//		}
+//
+//
+//			changed_bit = mptcp_addrset_add_addr_v4(event->event_type, event->address.addr_v4);
+//			if(changed_bit >= 0){
+//				loc4_changed_bits |= (1 << changed_bit);
+//			}
+//		}
+//		else {
+//			mptcp_debug("TODO process IPv6 events\n");
+//		}
+//		changed_bit = (event->family == AF_INET) ? mptcp_addrset_add_addr_v4(event->event_type, event->address.addr_v4)
+//												: -1;
+//		/* TODO for v6 call mptcp_addrset_add_addr_v6(event->event_type, event->address.addr_v4) */
+//
+//		if( changed_bit >= 0){
+//			//
+//		}
+
+		/* free event once handled */
+		list_del(&event->list);
+		kfree(event);
+	}
+
+	/* */
+	spin_unlock_bh(&mptcp_event_queue_lock);
+
+	mptcp_debug("Finished processing event queue\n");
+
+#if 0
+	/*
+	 * now we need to call our subflow manager to know
+	 * if it wants to use these new
+	 * paths all sockets
+	 */
+
+	/* if there has been any IPv4 changes update sockets */
+//	if(loc4_changed_bits != 0){
+
+		/* loop through all sockets to see if there anything to do */
+
+		for (i = 0; i < MPTCP_HASH_SIZE; i++) {
+			struct hlist_nulls_node *node;
+			rcu_read_lock_bh();
+			hlist_nulls_for_each_entry_rcu(meta_tp, node, &tk_hashtable[i],
+						       tk_table) {
+				struct mptcp_cb *mpcb = meta_tp->mpcb;
+				struct sock *meta_sk = (struct sock *)meta_tp;
+
+				/* qd le refcount est a 0 on peut liberer l'espace, */
+				if (unlikely(!atomic_inc_not_zero(&meta_sk->sk_refcnt)))
+					continue;
+
+				/* mpc permet de verifier qu'il s'agit d'une connexion mptcp
+				 * (si jamais on a juste envoyé le SYN sans connaitre la réponse)
+				 */
+				if (!meta_tp->mpc || !is_meta_sk(meta_sk) ||
+				    mpcb->infinite_mapping_snd ||
+				    mpcb->infinite_mapping_rcv) {
+					sock_put(meta_sk);
+					continue;
+				}
+
+				/* bottom halv lock: used when interruptions disabled */
+				bh_lock_sock(meta_sk);
+
+				/* check if the other half of the lock is owned by the application */
+				if (sock_owned_by_user(meta_sk)) {
+					/* in which case we delay the process */
+					/* TODO pass as extra data the bits changed */
+					mptcp_address_create_worker(mpcb);
+				} else {
+
+					/* pass the set ? no */
+					mptcp_sk_update( mpcb, loc4_changed_bits);
+					//, loc6_changed_bits
+//					if (family == AF_INET)
+//						/* handle event straightaway */
+//						mptcp_pm_addr4_event_handler(
+//								(struct in_ifaddr *)ptr, event, mpcb);
+//	#if IS_ENABLED(CONFIG_IPV6)
+//					else
+//						mptcp_pm_addr6_event_handler(
+//								(struct inet6_ifaddr *)ptr, event, mpcb);
+//	#endif
+				}
+
+				bh_unlock_sock(meta_sk);
+				sock_put(meta_sk);
+			}
+			rcu_read_unlock_bh();
+		}
+	}
+#endif
+//	return;
+}
+
+/**
+ * ptr should be either in_addr or in6_addr
+ *
+ */
+struct mptcp_event* mptcp_look_for_similar_event( void* ptr, int family)
+{
+	struct mptcp_event * event = 0;
+//	struct in_addr* addrv4 = 0;
+
+	/* pos/head/name */
+	list_for_each_entry(event, &mptcp_addr_waitq, list) {
+
+		if ( event->family != family)
+			continue;
+
+		// if dealing with IPv4
+		switch(event->family)
+		{
+		case AF_INET:
+
+			if (event->addr_v4.s_addr == ( (struct in_addr*) (ptr) )->s_addr )
+//			if (event->addr_v4.s_addr == ptr.addr_v4.s_addr )
+				return event;
+
+			break;
+		case AF_INET6:
+
+			//if (event->a.sa.sa_family == AF_INET6) {
+			if (ipv6_addr_equal(&event->addr_v6,(struct in6_addr*) ptr))
+//			if (ipv6_addr_equal(&event->addr_v6, ptr.addr_v6 ))
+				return event;
+			break;
+		default:
+			break;
+		};
+	}
+	return 0;
+}
+
+/*
+ * stores the events to later process them in batch
+ * ptr should be a sin_addr ?
+ * creates event only when needed
+ * returns 0 on success
+ */
+int mptcp_pm_queue_event(unsigned long event_type, void* addr, int family)
+{
+	struct mptcp_event*  event = NULL;
+	unsigned long timeo_val;
+	/*
+	 * We first check if there is an opposite event in queue
+	 * (if interface went down then up, both are cancelled)
+	 */
+
+	mptcp_debug("Trying to queue an event, checking for linked event\n");
+
+	// OTDO initialize spinlock ?
+	// First lock the event queue to prevent its modification while reading
+	spin_lock_bh( &mptcp_event_queue_lock);
+
+
+
+
+	/* look for events with same addr */
+	event = mptcp_look_for_similar_event( addr, family);
+	if (event) {
+
+
+
+		/* if opposed events, nothing happens */
+		if (event->event_type != event_type) {
+			mptcp_debug("Opposite event found");
+//			    " in wq %p\n", , &addrw->a,  &sctp_addr_waitq);
+
+			list_del(&event->list);
+			kfree(event);
+		}
+		else {
+			mptcp_debug("similar event found\n");
+			/* event of same type */
+		}
+		spin_unlock_bh(&mptcp_event_queue_lock);
+		return 0;
+	}
+
+	mptcp_debug("Allocating memory to record event\n");
+
+	/* this is a brand new event => add the new address to the wait queue */
+	event = kmalloc( sizeof(struct mptcp_event), GFP_ATOMIC );
+
+	if (event == NULL) {
+		spin_unlock_bh(&mptcp_event_queue_lock);
+		return 0; // TODO returns an error
+	}
+
+
+	event->family 		= family;
+	event->event_type 	= event_type;
+//	event->address 		= addr;
+	switch(event->family){
+		case AF_INET: 	event->addr_v4 = *((struct in_addr*) (addr) );break;
+		default:
+			mptcp_debug("Unhandled case\n");
+	};
+
+	//else event->addr_v6 =  *( (struct in6_addr*) (ptr) );
+
+	list_add_tail(&event->list, &mptcp_addr_waitq);
+	mptcp_debug("add new entry for cmd ");
+//	    " in wq %p\n", addrw->state, &addrw->a, &sctp_addr_waitq);
+
+	if (!timer_pending(&mptcp_event_wq_timer)) {
+		timeo_val = jiffies;
+		timeo_val += msecs_to_jiffies(MPTCP_EVENT_QUEUE_TICK_DELAY);
+		mod_timer(&mptcp_event_wq_timer, timeo_val);
+	}
+	spin_unlock_bh(&mptcp_event_queue_lock);
+	return 0;
+}
+
 
 /**
  * Create all new subflows, by doing calls to mptcp_initX_subsockets
